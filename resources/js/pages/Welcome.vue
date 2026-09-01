@@ -48,6 +48,51 @@ const lifecycle = [
     { status: 'delivered', title: 'Ключ выдан', body: 'Код доступен в GET /api/orders/{id}.' },
 ];
 
+/** Версии сверены с composer.json, package.json и образами в docker-compose.yml. */
+const stack = [
+    {
+        group: 'Бэкенд',
+        items: [
+            'PHP 8.4',
+            'Laravel 13',
+            'Laravel Horizon',
+            'Laravel Fortify',
+            'Inertia 3',
+            'L5-Swagger / OpenAPI 3.0',
+        ],
+    },
+    {
+        group: 'Данные и очереди',
+        items: [
+            'PostgreSQL 16',
+            'Redis 7',
+            'Очереди на Redis',
+            'Кэш и сессии на Redis',
+        ],
+    },
+    {
+        group: 'Фронтенд',
+        items: [
+            'Vue 3.5',
+            'TypeScript 5',
+            'Tailwind CSS 4',
+            'Reka UI',
+            'Vite 8',
+            'Laravel Wayfinder',
+        ],
+    },
+    {
+        group: 'Инфраструктура и качество',
+        items: [
+            'Docker Compose',
+            'Cloudflare Tunnel',
+            'PHPUnit 12',
+            'Larastan',
+            'Laravel Pint',
+        ],
+    },
+];
+
 const endpoints = [
     { method: 'GET', path: '/api/catalog', note: 'Витрина, keyset-пагинация' },
     { method: 'POST', path: '/api/orders', note: 'Создать заказ' },
@@ -244,6 +289,33 @@ const endpoints = [
                                     </span>
                                 </a>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Tech stack -->
+            <section class="border-t border-border">
+                <div class="mx-auto max-w-6xl px-6 py-20">
+                    <h2 class="mb-2 text-2xl font-semibold">Стек</h2>
+                    <p class="mb-10 max-w-2xl text-sm text-muted-foreground">
+                        Весь стенд поднимается одной командой <code class="rounded bg-muted px-1.5 py-0.5 text-xs">docker compose up -d</code>:
+                        приложение, база, Redis и воркер очередей — отдельными контейнерами.
+                    </p>
+
+                    <div class="grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
+                        <div v-for="column in stack" :key="column.group">
+                            <h3 class="mb-3 text-sm font-medium">{{ column.group }}</h3>
+                            <ul class="space-y-2">
+                                <li
+                                    v-for="item in column.items"
+                                    :key="item"
+                                    class="flex items-start gap-2 text-sm text-muted-foreground"
+                                >
+                                    <span class="mt-1.5 size-1 shrink-0 rounded-full bg-muted-foreground/50" />
+                                    {{ item }}
+                                </li>
+                            </ul>
                         </div>
                     </div>
                 </div>

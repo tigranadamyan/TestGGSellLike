@@ -148,9 +148,18 @@ Money ledger:
 ### Docker (рекомендуется)
 
 ```bash
-docker compose up -d
-docker compose exec app php artisan migrate --seed
-docker compose exec app php artisan horizon
+docker compose up -d --build            # app + postgres + redis + horizon
+docker compose exec app php artisan db:seed
+```
+
+Horizon поднимается отдельным контейнером `dgs_horizon`, запускать его через
+`exec` не нужно. Миграции выполняются на старте контейнера `app`.
+
+Чтобы дополнительно открыть стенд наружу через Cloudflare Tunnel:
+
+```bash
+docker compose --profile tunnel up -d
+docker logs dgs_tunnel | grep trycloudflare.com
 ```
 
 ### Локально
@@ -163,6 +172,27 @@ php artisan migrate --seed
 php artisan serve
 php artisan horizon
 ```
+
+## Очереди и Horizon
+
+Ключ выдаётся не в HTTP-запросе. Вебхук оплаты только переводит заказ в `paid` и
+ставит `DeliverProductJob` в очередь `deliveries`; саму выдачу выполняет фоновый
+воркер. Очередь разбирает **Laravel Horizon** — он работает отдельным контейнером
+`dgs_horizon`.
+
+Панель доступна локально на <http://localhost:8080/horizon>:
+
+![Панель Laravel Horizon: очереди deliveries и default, статус Active](docs/horizon.png)
+
+Супервизор слушает `deliveries` и `default` именно в таком порядке (`config/horizon.php`),
+чтобы выдача ключей не ждала за остальными задачами. Если очередь `deliveries` не
+указана в конфиге, заказы навсегда зависают в статусе `paid` — задачи копятся в
+Redis, но их некому взять.
+
+Через публичный туннель панель отвечает `401`. Это не Horizon, а `laravel/sentinel`,
+который Horizon вешает на свои маршруты: он отклоняет доступ, когда запрос пришёл
+через доверенный прокси с публичного IP. Ограничение намеренное — в Horizon можно
+перезапускать и удалять задачи, поэтому наружу панель не отдаётся.
 
 ## API
 
@@ -370,7 +400,6 @@ id > курсор: Index Cond: (id > 25004)       Buffers: shared hit=17
 отдаёт `meta.next_cursor`, а не номер страницы.
 
 ## Масштабирование
-
 - **Воркеры**: `php artisan horizon`; выдача идемпотентна, поэтому воркеров можно
   добавлять свободно — «захват» заказа (`claim`) не даст двум обработать один заказ.
 - **Чтение**: витрина не пишет и легко уходит на read-реплики; кэш перед ней
