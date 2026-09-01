@@ -27,3 +27,6 @@ yarn-error.log
 /.nova
 /.vscode
 /.zed
+
+# Local Postgres test env (see README: race testing)
+.env.pgtest

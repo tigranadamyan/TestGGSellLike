@@ -1,0 +1,79 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dgs_app
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=digital_goods
+      - DB_USERNAME=dgs_user
+      - DB_PASSWORD=dgs_secret
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - QUEUE_CONNECTION=redis
+      - CACHE_STORE=redis
+      - SESSION_DRIVER=redis
+    ports:
+      - "8080:8000"
+    networks:
+      - dgs
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: dgs_postgres
+    environment:
+      POSTGRES_DB: digital_goods
+      POSTGRES_USER: dgs_user
+      POSTGRES_PASSWORD: dgs_secret
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - dgs
+
+  redis:
+    image: redis:7-alpine
+    container_name: dgs_redis
+    ports:
+      - "6380:6379"
+    networks:
+      - dgs
+
+  horizon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dgs_horizon
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=digital_goods
+      - DB_USERNAME=dgs_user
+      - DB_PASSWORD=dgs_secret
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - QUEUE_CONNECTION=redis
+    command: php artisan horizon
+    networks:
+      - dgs
+
+volumes:
+  pgdata:
+
+networks:
+  dgs:
