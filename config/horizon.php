@@ -199,7 +199,10 @@ return [
     'defaults' => [
         'supervisor-1' => [
             'connection' => 'redis',
-            'queue' => ['default'],
+            // Deliveries are dispatched to their own queue (see PaymentService and
+            // ReconciliationService) and are listed first so key issuance is not
+            // held up behind whatever else is on `default`.
+            'queue' => ['deliveries', 'default'],
             'balance' => 'auto',
             'autoScalingStrategy' => 'time',
             'maxProcesses' => 1,

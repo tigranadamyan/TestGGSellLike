@@ -1,3 +1,30 @@
+# ===================================================
+# Digital Goods Store — полный локальный стек
+#   docker compose up -d --build           # app + postgres + redis + horizon
+#   docker compose --profile tunnel up -d  # то же + публичный Cloudflare-туннель
+# ===================================================
+
+x-app-env: &app-env
+  APP_ENV: local
+  APP_DEBUG: "true"
+  APP_KEY: base64:6ID2rdeyVpb53PWzxsP8DGgVEBP0elOOx64hmgVYPzU=
+  APP_URL: http://localhost:8080
+  # Явно: без этого Laravel берёт DB_CONNECTION=sqlite из .env
+  DB_CONNECTION: pgsql
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_DATABASE: digital_goods
+  DB_USERNAME: dgs_user
+  DB_PASSWORD: dgs_secret
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_CLIENT: phpredis
+  QUEUE_CONNECTION: redis
+  CACHE_STORE: redis
+  SESSION_DRIVER: redis
+  # The built-in server handles one request at a time without this.
+  PHP_CLI_SERVER_WORKERS: "4"
+
 services:
   app:
     build:
@@ -8,21 +35,41 @@ services:
     volumes:
       - .:/var/www/html
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_DATABASE=digital_goods
-      - DB_USERNAME=dgs_user
-      - DB_PASSWORD=dgs_secret
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - QUEUE_CONNECTION=redis
-      - CACHE_STORE=redis
-      - SESSION_DRIVER=redis
+      <<: *app-env
+    command: >
+      sh -c "php artisan config:clear &&
+             php artisan migrate --force &&
+             php artisan l5-swagger:generate &&
+             php -S 0.0.0.0:8000 -t public server.php"
     ports:
       - "8080:8000"
+    networks:
+      - dgs
+
+  horizon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dgs_horizon
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      app:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+    command: sh -c "php artisan config:clear && php artisan horizon"
+    restart: unless-stopped
     networks:
       - dgs
 
@@ -37,6 +84,11 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dgs_user -d digital_goods"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - dgs
 
@@ -45,30 +97,24 @@ services:
     container_name: dgs_redis
     ports:
       - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     networks:
       - dgs
 
-  horizon:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: dgs_horizon
-    working_dir: /var/www/html
-    volumes:
-      - .:/var/www/html
+  # Публичный URL без домена и авторизации: docker compose --profile tunnel up -d
+  # Адрес смотреть в: docker compose logs tunnel | grep trycloudflare.com
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: dgs_tunnel
+    profiles: ["tunnel"]
     depends_on:
-      - postgres
-      - redis
-    environment:
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_DATABASE=digital_goods
-      - DB_USERNAME=dgs_user
-      - DB_PASSWORD=dgs_secret
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - QUEUE_CONNECTION=redis
-    command: php artisan horizon
+      - app
+    command: tunnel --no-autoupdate --url http://app:8000
+    restart: unless-stopped
     networks:
       - dgs
 

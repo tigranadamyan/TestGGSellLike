@@ -1,0 +1,9 @@
+tunnel: dgs-tunnel
+credentials-file: ~/.cloudflared/dgs-tunnel.json
+
+ingress:
+  - hostname: dgs.${CF_DOMAIN}
+    service: http://localhost:8080
+    originRequest:
+      noTLSVerify: true
+  - service: http_status:404

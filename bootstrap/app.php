@@ -19,6 +19,8 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->job(new \App\Jobs\RecoverStaleOrdersJob)->everyFiveMinutes();
     })
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->trustProxies(at: '*');
+
         $middleware->encryptCookies(except: ['appearance', 'sidebar_state']);
 
         $middleware->web(append: [
