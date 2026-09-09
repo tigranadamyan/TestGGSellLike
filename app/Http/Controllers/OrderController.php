@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Http\Requests\CreateOrderRequest;
+use App\Models\Order;
 use App\Models\Product;
 use App\Services\OrderService;
 use Illuminate\Http\JsonResponse;
@@ -60,7 +61,26 @@ class OrderController extends Controller
     public function store(CreateOrderRequest $request): JsonResponse
     {
         $product = Product::where('sku', $request->validated('sku'))->firstOrFail();
-        $order = $this->orderService->createOrder($product);
+
+        // Check for idempotency key to prevent duplicate orders
+        $idempotencyKey = $request->header('X-Idempotency-Key');
+        if ($idempotencyKey) {
+            $existingOrder = Order::where('idempotency_key', $idempotencyKey)->first();
+            if ($existingOrder) {
+                return response()->json([
+                    'data' => [
+                        'id' => $existingOrder->id,
+                        'sku' => $existingOrder->sku,
+                        'price' => $existingOrder->price,
+                        'currency' => $existingOrder->currency,
+                        'status' => $existingOrder->status->value,
+                        'created_at' => $existingOrder->created_at,
+                    ],
+                ], Response::HTTP_OK);
+            }
+        }
+
+        $order = $this->orderService->createOrder($product, $idempotencyKey);
 
         return response()->json([
             'data' => [
@@ -121,6 +141,8 @@ class OrderController extends Controller
             return response()->json(['error' => 'Order not found'], Response::HTTP_NOT_FOUND);
         }
 
+        $reservation = $this->orderService->getReservation($order);
+
         return response()->json([
             'data' => [
                 'id' => $order->id,
@@ -132,6 +154,11 @@ class OrderController extends Controller
                     'status' => $order->delivery->status->value,
                     'code' => $order->delivery->code,
                     'supplier' => $order->delivery->supplier,
+                ] : null,
+                'reservation' => $reservation ? [
+                    'expires_at' => $reservation->expires_at->toISOString(),
+                    'remaining_seconds' => max(0, $reservation->expires_at->diffInSeconds(now())),
+                    'is_active' => $reservation->isActive(),
                 ] : null,
                 'created_at' => $order->created_at,
             ],

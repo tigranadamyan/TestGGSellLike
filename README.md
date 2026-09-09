@@ -162,6 +162,28 @@ docker compose --profile tunnel up -d
 docker logs dgs_tunnel | grep trycloudflare.com
 ```
 
+Или одной командой — `./scripts/start.sh --tunnel` дождётся готовности приложения
+и напечатает публичный адрес.
+
+Это **quick tunnel**: аккаунт Cloudflare, свой домен и `cloudflared tunnel login`
+не нужны. Взамен три ограничения:
+
+- Адрес выдаётся случайный и меняется при каждом пересоздании контейнера
+  `dgs_tunnel`. Сохранить конкретный `*.trycloudflare.com` нельзя.
+- Ссылка публичная — сайт видит любой, у кого она есть.
+- Регистрация недолговечна. Через несколько часов Cloudflare может разорвать её,
+  и в логе пойдёт `control stream encountered a failure`. Контейнер при этом не
+  падает и сам новый адрес не запрашивает, поэтому лечится пересозданием:
+
+  ```bash
+  docker compose --profile tunnel up -d --force-recreate tunnel
+  ```
+
+Если нужен постоянный адрес — это named tunnel: он требует аккаунт Cloudflare с
+добавленным доменом, `cloudflared tunnel login`, `cloudflared tunnel create` и
+токен туннеля в переменной `CLOUDFLARE_TUNNEL_TOKEN`. Тогда сервису `tunnel` в
+`docker-compose.yml` вместо `--url` задаётся `tunnel --no-autoupdate run`.
+
 ### Локально
 
 Требуется PostgreSQL и Redis, запущенные локально.

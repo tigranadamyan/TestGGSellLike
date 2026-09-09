@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { Head, Link } from '@inertiajs/vue3';
-import { computed } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { dashboard, login, register } from '@/routes';
 import Button from '@/components/ui/button/Button.vue';
+import { subscribeToCatalog } from '@/composables/useBroadcast';
 
 interface CatalogItem {
     sku: string;
@@ -18,6 +19,23 @@ const props = defineProps<{
     catalog: CatalogItem[];
     stats: { products: number; available_keys: number; delivered: number };
 }>();
+
+// Local copy of catalog for real-time updates
+const localCatalog = ref<CatalogItem[]>([...props.catalog]);
+const connectionStatus = ref<'connected' | 'disconnected' | 'connecting'>('connecting');
+
+// Purchase resilience state
+const purchasingSku = ref<string | null>(null);
+const purchaseError = ref<string | null>(null);
+const purchaseSuccess = ref<string | null>(null);
+const lastOrderId = ref<number | null>(null);
+
+// Search state
+const searchQuery = ref('');
+const searchResults = ref<CatalogItem[]>([]);
+const isSearching = ref(false);
+const searchTotal = ref(0);
+let searchAbortController: AbortController | null = null;
 
 /** `price` arrives as a decimal string — parse only for display, never for maths. */
 const formatPrice = (price: string, currency: string) =>
@@ -38,7 +56,159 @@ const typeLabels: Record<string, string> = {
 
 const typeLabel = (type: string) => typeLabels[type] ?? type;
 
-const hasCatalog = computed(() => props.catalog.length > 0);
+const hasCatalog = computed(() => localCatalog.value.length > 0);
+
+// Generate idempotency key for purchase
+function generateIdempotencyKey(): string {
+    return `order_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
+// Debounce function to prevent double-clicks
+function debounce<T extends (...args: any[]) => any>(fn: T, delay: number): T {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    return ((...args: any[]) => {
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => fn(...args), delay);
+    }) as T;
+}
+
+// Purchase handler with debounce and idempotency
+const handlePurchase = debounce(async (sku: string) => {
+    // Prevent double-purchase
+    if (purchasingSku.value) {
+        return;
+    }
+
+    // Check if we already have a pending order for this SKU
+    const existingOrderId = localStorage.getItem(`pending_order_${sku}`);
+    if (existingOrderId) {
+        // Redirect to existing order
+        window.location.href = `/orders/${existingOrderId}`;
+        return;
+    }
+
+    purchasingSku.value = sku;
+    purchaseError.value = null;
+    purchaseSuccess.value = null;
+
+    try {
+        const idempotencyKey = generateIdempotencyKey();
+        localStorage.setItem(`pending_order_${sku}`, idempotencyKey);
+
+        const response = await fetch('/api/orders', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Idempotency-Key': idempotencyKey,
+            },
+            body: JSON.stringify({ sku }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to create order');
+        }
+
+        lastOrderId.value = data.data.id;
+        localStorage.setItem(`pending_order_${sku}`, data.data.id.toString());
+
+        // Redirect to order page
+        window.location.href = `/orders/${data.data.id}`;
+    } catch (error: any) {
+        purchaseError.value = error.message || 'Ошибка при создании заказа';
+        localStorage.removeItem(`pending_order_${sku}`);
+    } finally {
+        purchasingSku.value = null;
+    }
+}, 500);
+
+// Search handler with debounce
+const handleSearch = debounce(async (query: string) => {
+    if (!query || query.length < 2) {
+        searchResults.value = [];
+        searchTotal.value = 0;
+        return;
+    }
+
+    // Cancel previous search if still running
+    if (searchAbortController) {
+        searchAbortController.abort();
+    }
+
+    searchAbortController = new AbortController();
+    isSearching.value = true;
+
+    try {
+        const params = new URLSearchParams({
+            q: query,
+            per_page: '24',
+        });
+
+        const response = await fetch(`/api/search?${params}`, {
+            signal: searchAbortController.signal,
+        });
+
+        if (!response.ok) {
+            throw new Error('Search failed');
+        }
+
+        const data = await response.json();
+        searchResults.value = data.data;
+        searchTotal.value = data.meta.total;
+    } catch (error: any) {
+        if (error.name !== 'AbortError') {
+            console.error('Search error:', error);
+        }
+    } finally {
+        isSearching.value = false;
+    }
+}, 300);
+
+// Watch search query and trigger search
+const onSearchInput = (event: Event) => {
+    const target = event.target as HTMLInputElement;
+    searchQuery.value = target.value;
+    handleSearch(target.value);
+};
+
+// Real-time update handler
+let unsubscribe: (() => void) | null = null;
+
+onMounted(() => {
+    // Connect to WebSocket and subscribe to catalog updates
+    unsubscribe = subscribeToCatalog((data) => {
+        connectionStatus.value = 'connected';
+        const { product, change_type } = data;
+
+        // Find and update the product in local catalog
+        const index = localCatalog.value.findIndex((item) => item.sku === product.sku);
+
+        if (index !== -1) {
+            // Update existing product
+            localCatalog.value[index] = {
+                ...localCatalog.value[index],
+                price: product.price,
+                in_stock: product.in_stock,
+                available: product.available,
+            };
+        } else if (product.in_stock) {
+            // Add new product if it's in stock and not already in catalog
+            localCatalog.value.push(product);
+        }
+    });
+
+    // Mark as connected after a short delay
+    setTimeout(() => {
+        if (connectionStatus.value === 'connecting') {
+            connectionStatus.value = 'connected';
+        }
+    }, 1000);
+});
+
+onUnmounted(() => {
+    unsubscribe?.();
+});
 
 /** Mirrors App\Enums\OrderStatus — the happy path only. */
 const lifecycle = [
@@ -185,16 +355,101 @@ const endpoints = [
                             <h2 class="text-2xl font-semibold">Каталог</h2>
                             <p class="mt-1 text-sm text-muted-foreground">
                                 Живые данные из <code class="rounded bg-muted px-1.5 py-0.5 text-xs">GET /api/catalog</code>
+                                <span
+                                    v-if="connectionStatus === 'connected'"
+                                    class="ml-2 inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400"
+                                >
+                                    <span class="size-1.5 rounded-full bg-emerald-500" />
+                                    Live
+                                </span>
+                                <span
+                                    v-else-if="connectionStatus === 'connecting'"
+                                    class="ml-2 inline-flex items-center gap-1 text-amber-600 dark:text-amber-400"
+                                >
+                                    <span class="size-1.5 rounded-full bg-amber-500 animate-pulse" />
+                                    Подключение...
+                                </span>
                             </p>
                         </div>
-                        <a href="/api/documentation" class="text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline">
-                            Открыть в Swagger →
-                        </a>
+                        <div class="flex items-center gap-4">
+                            <div class="relative">
+                                <input
+                                    type="text"
+                                    placeholder="Поиск по каталогу..."
+                                    class="w-64 rounded-lg border border-border bg-background px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                                    @input="onSearchInput"
+                                />
+                                <span
+                                    v-if="isSearching"
+                                    class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+                                >
+                                    <svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                    </svg>
+                                </span>
+                            </div>
+                            <a href="/api/documentation" class="text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline">
+                                Открыть в Swagger →
+                            </a>
+                        </div>
+                    </div>
+
+                    <!-- Search results -->
+                    <div v-if="searchQuery && searchResults.length > 0" class="mb-8">
+                        <h3 class="mb-4 text-lg font-medium">
+                            Результаты поиска ({{ searchTotal }})
+                        </h3>
+                        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                            <article
+                                v-for="item in searchResults"
+                                :key="item.sku"
+                                class="flex flex-col rounded-xl border border-border bg-card p-5 transition-shadow hover:shadow-md"
+                            >
+                                <span class="mb-3 w-fit rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
+                                    {{ typeLabel(item.type) }}
+                                </span>
+                                <h3 class="mb-1 leading-snug font-medium text-pretty">{{ item.name }}</h3>
+                                <code class="mb-4 text-xs text-muted-foreground">{{ item.sku }}</code>
+
+                                <div class="mt-auto">
+                                    <div class="flex items-end justify-between gap-2 mb-3">
+                                        <span class="text-xl font-semibold tabular-nums">
+                                            {{ formatPrice(item.price, item.currency) }}
+                                        </span>
+                                        <span
+                                            class="text-xs tabular-nums"
+                                            :class="item.in_stock ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'"
+                                        >
+                                            {{ item.in_stock ? `${item.available} шт.` : 'нет в наличии' }}
+                                        </span>
+                                    </div>
+                                    <Button
+                                        v-if="item.in_stock"
+                                        size="sm"
+                                        class="w-full"
+                                        :disabled="purchasingSku === item.sku || !item.in_stock"
+                                        @click="handlePurchase(item.sku)"
+                                    >
+                                        <span v-if="purchasingSku === item.sku">Оформление...</span>
+                                        <span v-else>Купить</span>
+                                    </Button>
+                                    <Button v-else size="sm" variant="outline" class="w-full" disabled>
+                                        Нет в наличии
+                                    </Button>
+                                </div>
+                            </article>
+                        </div>
+                    </div>
+
+                    <!-- No search results -->
+                    <div v-else-if="searchQuery && searchResults.length === 0 && !isSearching" class="mb-8 rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
+                        По запросу "{{ searchQuery }}" ничего не найдено.
                     </div>
 
                     <div v-if="hasCatalog" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                         <article
-                            v-for="item in catalog"
+                            v-for="item in localCatalog"
                             :key="item.sku"
                             class="flex flex-col rounded-xl border border-border bg-card p-5 transition-shadow hover:shadow-md"
                         >
@@ -204,18 +459,38 @@ const endpoints = [
                             <h3 class="mb-1 leading-snug font-medium text-pretty">{{ item.name }}</h3>
                             <code class="mb-4 text-xs text-muted-foreground">{{ item.sku }}</code>
 
-                            <div class="mt-auto flex items-end justify-between gap-2">
-                                <span class="text-xl font-semibold tabular-nums">
-                                    {{ formatPrice(item.price, item.currency) }}
-                                </span>
-                                <span
-                                    class="text-xs tabular-nums"
-                                    :class="item.in_stock ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'"
+                            <div class="mt-auto">
+                                <div class="flex items-end justify-between gap-2 mb-3">
+                                    <span class="text-xl font-semibold tabular-nums">
+                                        {{ formatPrice(item.price, item.currency) }}
+                                    </span>
+                                    <span
+                                        class="text-xs tabular-nums"
+                                        :class="item.in_stock ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'"
+                                    >
+                                        {{ item.in_stock ? `${item.available} шт.` : 'нет в наличии' }}
+                                    </span>
+                                </div>
+                                <Button
+                                    v-if="item.in_stock"
+                                    size="sm"
+                                    class="w-full"
+                                    :disabled="purchasingSku === item.sku || !item.in_stock"
+                                    @click="handlePurchase(item.sku)"
                                 >
-                                    {{ item.in_stock ? `${item.available} шт.` : 'нет в наличии' }}
-                                </span>
+                                    <span v-if="purchasingSku === item.sku">Оформление...</span>
+                                    <span v-else>Купить</span>
+                                </Button>
+                                <Button v-else size="sm" variant="outline" class="w-full" disabled>
+                                    Нет в наличии
+                                </Button>
                             </div>
                         </article>
+                    </div>
+
+                    <!-- Purchase error message -->
+                    <div v-if="purchaseError" class="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
+                        {{ purchaseError }}
                     </div>
 
                     <p v-else class="rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">

@@ -16,6 +16,7 @@ class PaymentService
 {
     public function __construct(
         private readonly LedgerService $ledger,
+        private readonly ReservationService $reservationService,
     ) {}
 
     /** @param  array<string,mixed>  $payload */
@@ -75,6 +76,17 @@ class PaymentService
                 'order_id' => $order->id,
                 'event_id' => $event->event_id,
                 'current_status' => $order->status->value,
+            ]);
+
+            return false;
+        }
+
+        // Validate reservation is still active (skip if no reservation exists for backward compatibility)
+        $hasReservation = \App\Models\Reservation::where('order_id', $order->id)->exists();
+        if ($hasReservation && ! $this->reservationService->validateReservation($order)) {
+            Log::warning('payment.reservation_expired', [
+                'order_id' => $order->id,
+                'event_id' => $event->event_id,
             ]);
 
             return false;

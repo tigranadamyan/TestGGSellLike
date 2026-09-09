@@ -10,6 +10,7 @@ use App\Services\LedgerService;
 use App\Services\OrderService;
 use App\Services\PaymentService;
 use App\Services\ReconciliationService;
+use App\Services\ReservationService;
 use App\Suppliers\Contracts\SupplierInterface;
 use App\Suppliers\SupplierManager;
 use Illuminate\Support\ServiceProvider;
@@ -34,6 +35,8 @@ class SupplierServiceProvider extends ServiceProvider
 
         $this->app->singleton(CatalogService::class, fn () => new CatalogService);
 
+        $this->app->singleton(ReservationService::class, fn () => new ReservationService);
+
         $this->app->singleton(DeliveryService::class, function ($app) {
             return new DeliveryService(
                 $app->make(SupplierManager::class),
@@ -45,11 +48,14 @@ class SupplierServiceProvider extends ServiceProvider
         $this->app->singleton(PaymentService::class, function ($app) {
             return new PaymentService(
                 $app->make(LedgerService::class),
+                $app->make(ReservationService::class),
             );
         });
 
-        $this->app->singleton(OrderService::class, function () {
-            return new OrderService;
+        $this->app->singleton(OrderService::class, function ($app) {
+            return new OrderService(
+                $app->make(ReservationService::class),
+            );
         });
 
         $this->app->singleton(ReconciliationService::class, function ($app) {

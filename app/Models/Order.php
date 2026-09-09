@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Enums\OrderStatus;
+use App\Events\OrderStatusChanged;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
@@ -12,7 +13,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Order extends Model
 {
-    protected $fillable = ['product_id', 'sku', 'price', 'currency', 'status'];
+    protected $fillable = ['product_id', 'sku', 'price', 'currency', 'status', 'idempotency_key'];
 
     protected $casts = [
         'price' => 'decimal:2',
@@ -49,6 +50,12 @@ class Order extends Model
         return $this->hasOne(ProductKey::class);
     }
 
+    /** @return HasOne<Reservation, $this> */
+    public function reservation(): HasOne
+    {
+        return $this->hasOne(Reservation::class);
+    }
+
     public function transitionTo(OrderStatus $newStatus): void
     {
         if (! $this->status->canTransitionTo($newStatus)) {
@@ -57,6 +64,11 @@ class Order extends Model
             );
         }
 
+        $oldStatus = $this->status->value;
+
         $this->update(['status' => $newStatus]);
+
+        // Broadcast status change for real-time frontend updates
+        OrderStatusChanged::dispatch($this, $oldStatus, $newStatus->value);
     }
 }
