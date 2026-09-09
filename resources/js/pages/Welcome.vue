@@ -386,6 +386,7 @@ const endpoints = [
                 <div class="flex items-center gap-2 sm:gap-4">
                     <a href="#catalog" class="hidden text-sm text-muted-foreground transition-colors hover:text-foreground sm:inline">Каталог</a>
                     <a href="/api/documentation" class="hidden text-sm text-muted-foreground transition-colors hover:text-foreground sm:inline">API</a>
+                    <a href="/stand" class="hidden text-sm text-muted-foreground transition-colors hover:text-foreground sm:inline">Стенд</a>
 
                     <a
                         href="/cart"
