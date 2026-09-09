@@ -6,22 +6,127 @@
 
 ```
 app/
-├── Actions/                    # (зарезервировано для будущих action-классов)
-├── Console/Commands/           # ReconcileOrdersCommand
+├── Console/Commands/           # ReconcileOrders, CatalogRecount, CatalogBenchmark, RaceTest, DemoStock
 ├── DTO/                        # IssueRequest, IssueResult
-├── Enums/                      # OrderStatus, PaymentEventStatus, ProductKeyStatus, DeliveryStatus
+├── Enums/                      # OrderStatus, PaymentEventStatus, ProductKeyStatus, DeliveryStatus, LedgerAccount
+├── Events/                     # CatalogUpdated, OrderStatusChanged            ← этап 2
+├── Exceptions/                 # OutOfStockException                          ← этап 2
 ├── Http/
-│   ├── Controllers/            # OrderController, PaymentWebhookController, ReconciliationController
-│   └── Requests/               # CreateOrderRequest, PaymentWebhookRequest
-├── Jobs/                       # DeliverProductJob, RecoverStaleOrdersJob
-├── Models/                     # Product, Order, PaymentEvent, ProductKey, Delivery, SupplierRequest, MoneyMovement
+│   ├── Controllers/            # Catalog, Order, OrderShow, Search, PaymentWebhook, Reconciliation, Welcome
+│   └── Requests/               # CatalogRequest, CreateOrderRequest, PaymentWebhookRequest
+├── Jobs/                       # DeliverProductJob, RecoverStaleOrdersJob, CancelExpiredReservations
+├── Models/                     # Product, Order, PaymentEvent, ProductKey, Delivery, SupplierRequest,
+│                               # MoneyMovement, Reservation                    ← этап 2
 ├── Providers/                  # SupplierServiceProvider
-├── Services/                   # OrderService, PaymentService, DeliveryService, ReconciliationService
+├── Services/                   # Order, Payment, Delivery, Reconciliation, Catalog, Ledger, Reservation
 └── Suppliers/                  # SupplierA, SupplierB, SupplierManager, Contracts/SupplierInterface
+
+resources/js/
+├── composables/useBroadcast.ts # подписка на Reverb, реальное состояние сокета  ← этап 2
+└── pages/                      # Welcome.vue (витрина), OrderShow.vue (заказ)   ← этап 2
+
+docker/nginx/                   # один origin для сайта и WebSocket             ← этап 2
 ```
 
 **Стек**: PHP 8.3+, Laravel 13, PostgreSQL 16+, Redis, Laravel Horizon, Laravel Reverb,
 Vue 3 + Inertia, PHPUnit.
+
+## Этап 2 — что реализовано
+
+Первый этап дал витрину, оформление и выдачу. Второй строится поверх него и добавляет
+то, что проявляется только под конкуренцией: живые остатки, честную покупку последней
+единицы и бронь с таймером.
+
+### Задача 1. Живая витрина
+
+| Требование | Готово | Где |
+|---|---|---|
+| Изменение цены или наличия видно во всех вкладках без перезагрузки | да | `CatalogUpdated` → Reverb → `useBroadcast.ts` |
+| При нуле кнопка «Купить» гаснет у всех сразу | да | `Welcome.vue`, карточка переходит в `in_stock: false` |
+| Подорожание видно до оплаты, пока товар лежит в корзине | да | `CartService`, страница `/cart` |
+| Работает после перезагрузки и обрыва связи | да | pusher-js переподключается, бейдж «Live» отражает реальное состояние |
+
+#### Корзина и изменившаяся цена
+
+Корзина живёт в сессии (Redis). Каждая строка помнит цену, по которой товар
+добавляли, — но платить по ней нельзя никогда: это нужно только чтобы показать,
+что цена сдвинулась.
+
+Гарантия держится на **двух** механизмах, и второй — главный:
+
+1. **Живое обновление.** Пришёл `CatalogUpdated` по товару из корзины — строка
+   сразу перерисовывается: старая цена зачёркнута, новая рядом, итог пересчитан,
+   сверху баннер «Цена изменилась, пока товар лежал в корзине».
+2. **Отказ на сервере.** `POST /cart/checkout` сравнивает `price_at_add` с текущей
+   ценой. Если они разошлись — `409 price_changed` со списком изменившихся строк,
+   и **заказ не создаётся**. Только после этого сервер принимает новую цену как
+   показанную, и повторный клик оформляет заказ по ней.
+
+Второй пункт и есть суть требования: даже если сокет оборвался и покупатель не
+увидел живого обновления, оплатить старую цену он не сможет — checkout остановит
+его и покажет новую.
+
+Цена **заказа** после создания фиксируется: подорожание уже оформленного заказа
+сумму к оплате не меняет. Корзина — это то, что до заказа.
+
+### Задача 2. Покупка последней единицы наперегонки
+
+| Требование | Готово | Где |
+|---|---|---|
+| Последнюю единицу получает только один | да | выбор ключа под `FOR UPDATE SKIP LOCKED` |
+| Второму — понятное сообщение, не ошибка | да | `409 {"error":"sold_out","message":"Этот товар только что раскупили."}` |
+| Ни у кого не остаётся оплаченного заказа без товара | да | заказ проигравшего откатывается в транзакции — платить нечему |
+
+### Задача 3. Бронь с таймером
+
+| Требование | Готово | Где |
+|---|---|---|
+| Видимый обратный отсчёт на странице оформления | да | `OrderShow.vue`, `/orders/{id}` |
+| По истечении бронь снимается, товар возвращается всем | да | `CancelExpiredReservations` раз в минуту, контейнер `dgs_scheduler` |
+| Успели оплатить — заказ уходит в выдачу, отсчёт ни на что не влияет | да | `PaymentService`, переход `paid → delivering → delivered` |
+| Один товар не забронирован под два заказа | да | `UNIQUE (product_key_id) WHERE cancelled_at IS NULL` |
+
+### Задача 4. Устойчивость покупки (бонус)
+
+| Требование | Готово | Где |
+|---|---|---|
+| Двойной клик, «Назад», обновление, обрыв связи не создают второй заказ | да | ключ идемпотентности в `X-Idempotency-Key` + `UNIQUE (idempotency_key)` |
+| После любого из этих действий виден верный статус | да | событие статуса несёт ключ; плюс опрос раз в 3 с, если сокет отвалился |
+| Повторная оплата ничего не меняет | да | машина состояний: применяется только событие для заказа в `created` |
+
+### Задача 5. Мгновенный поиск (бонус)
+
+| Требование | Готово | Где |
+|---|---|---|
+| Результат обновляется по мере ввода, без мигания | да | debounce 300 мс, PostgreSQL GIN + `plainto_tsquery('russian', …)` |
+| Устаревшие ответы не перетирают свежие | да | `AbortController` отменяет предыдущий запрос |
+| Фильтры сохраняются в адресе и открываются по прямой ссылке | да | `?q=…&type=…`, состояние восстанавливается при загрузке |
+
+Поиск идёт по русской морфологии, а не по подстроке: запрос «ключ» находит товары
+со словами «ключа», «ключом» в названии.
+
+### Инфраструктура, которой не было на первом этапе
+
+| Контейнер | Зачем |
+|---|---|
+| `dgs_reverb` | WebSocket-сервер для живых обновлений |
+| `dgs_scheduler` | снимает просроченные брони; без него ключ не вернётся в продажу |
+| `dgs_proxy` | nginx: `/app` → Reverb, остальное → приложение, один origin для туннеля |
+
+### Тесты этапа
+
+`126 passed`. Новое покрытие:
+
+| Файл | О чём |
+|---|---|
+| `ReservationTest` | бронь держит конкретный ключ, снимает его с витрины, возвращает по истечении; ключ едет в событии |
+| `LastUnitRaceTest` | один победитель, `409` проигравшему, за проигравшим не остаётся заказа |
+| `PurchaseResilienceTest` | повторный сабмит, повторная оплата, платёж не теряется при истёкшей брони |
+| `CatalogSearchTest` | поиск по названию и SKU, фильтр по типу, скрытие распроданного, валидация |
+| `CartPriceChangeTest` | корзина показывает живую цену, checkout отказывает при расхождении и списывает новую |
+
+Как это устроено внутри — в разделе
+[«Живая витрина, бронь и гонка за последней единицей»](#живая-витрина-бронь-и-гонка-за-последней-единицей).
 
 ## Стратегия exactly-once доставки
 
@@ -251,10 +356,19 @@ curl -X POST localhost:8080/api/orders -H 'Content-Type: application/json' \
 Остаток на карточках уменьшится в обеих вкладках без перезагрузки. Когда он дойдёт
 до нуля, кнопка «Купить» станет неактивной одновременно у всех.
 
+Вернуть товар в нужное состояние (снимает активные брони и выставляет ровно столько
+ключей, сколько попросили) — чтобы демонстрацию можно было повторять:
+
+```bash
+docker compose exec app php artisan demo:stock KEY-CS2-PRIME 2
+```
+
 **Гонка за последней единицей.** Оставьте у товара один ключ и ударьте двумя
 запросами сразу:
 
 ```bash
+docker compose exec app php artisan demo:stock GIFT-ROBLOX-800 1
+
 for i in 1 2; do
   curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8080/api/orders \
        -H 'Content-Type: application/json' -d '{"sku":"GIFT-ROBLOX-800"}' &
@@ -262,6 +376,17 @@ done; wait
 ```
 
 Один ответ `201`, другой `409` с сообщением «Этот товар только что раскупили».
+
+**Цена изменилась в корзине.** Добавьте товар в корзину, откройте `/cart` и
+поднимите цену мимо браузера:
+
+```bash
+docker compose exec app php artisan demo:price KEY-GTA5 2490.00
+```
+
+Строка перерисуется без перезагрузки: старая цена зачёркнута, новая рядом, итог
+пересчитан. Кнопка сменится на «Подтвердить новую цену» — первый клик по ней
+вернёт `409` и покажет расхождение, второй оформит заказ уже по новой цене.
 
 **Бронь с таймером.** Откройте `/orders/{id}` сразу после создания заказа — там
 идёт обратный отсчёт. Через пять минут (или после `UPDATE reservations SET
@@ -293,6 +418,12 @@ Redis, но их некому взять.
 ```
 GET    /api/catalog                  — Витрина остатков (keyset-пагинация)
 GET    /api/search                   — Полнотекстовый поиск (q, type, in_stock)
+
+GET    /cart                         — Корзина (сессия)
+POST   /cart                         — Добавить товар (тело: {sku, qty?})
+PATCH  /cart/{sku}                   — Изменить количество
+DELETE /cart/{sku}                   — Убрать товар
+POST   /cart/checkout                — Оформить; 409, если цена изменилась
 POST   /api/orders                   — Создать заказ (тело: {sku}); 409, если раскуплен
 GET    /api/orders/{id}              — Получить заказ + доставку
 POST   /api/webhooks/payment         — Вебхук оплаты
@@ -306,6 +437,8 @@ php artisan orders:reconcile       — сверка, восстановлени�
 php artisan catalog:recount        — проверить/починить счётчик остатков
 php artisan catalog:benchmark      — планы выполнения витрины
 php artisan race:test              — проверка exactly-once под гонкой
+php artisan demo:stock <SKU> <N>   — выставить товару ровно N ключей (для демо)
+php artisan demo:price <SKU> <цена> — изменить цену и разослать её всем (для демо)
 ```
 
 Полная документация API: [API.md](./API.md)

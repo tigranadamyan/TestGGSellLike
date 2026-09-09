@@ -42,6 +42,8 @@ class HandleInertiaRequests extends Middleware
                 'user' => $request->user(),
             ],
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
+            // Header badge needs this on every page, not just the cart itself.
+            'cartCount' => app(\App\Services\CartService::class)->count(),
         ];
     }
 }

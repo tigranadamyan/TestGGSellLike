@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { Head, Link } from '@inertiajs/vue3';
+import { Head, Link, usePage } from '@inertiajs/vue3';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { dashboard, login, register } from '@/routes';
 import Button from '@/components/ui/button/Button.vue';
 import { connectionState, subscribeToCatalog } from '@/composables/useBroadcast';
+import { api } from '@/lib/http';
 
 interface CatalogItem {
     sku: string;
@@ -29,6 +30,30 @@ const connectionStatus = connectionState;
 
 /** Prices that changed under the viewer's feet, keyed by SKU: old -> new. */
 const priceChanges = ref<Record<string, string>>({});
+
+// Cart badge; the server seeds it on every page load.
+const cartCount = ref<number>((usePage().props as { cartCount?: number }).cartCount ?? 0);
+const addingSku = ref<string | null>(null);
+
+async function addToCart(sku: string): Promise<void> {
+    if (addingSku.value) {
+        return;
+    }
+
+    addingSku.value = sku;
+
+    try {
+        const response = await api('/cart', { method: 'POST', body: JSON.stringify({ sku }) });
+
+        if (response.ok) {
+            cartCount.value = (await response.json()).count;
+        }
+    } catch {
+        purchaseError.value = 'Не удалось добавить в корзину.';
+    } finally {
+        addingSku.value = null;
+    }
+}
 
 // Purchase resilience state
 const purchasingSku = ref<string | null>(null);
@@ -362,6 +387,17 @@ const endpoints = [
                     <a href="#catalog" class="hidden text-sm text-muted-foreground transition-colors hover:text-foreground sm:inline">Каталог</a>
                     <a href="/api/documentation" class="hidden text-sm text-muted-foreground transition-colors hover:text-foreground sm:inline">API</a>
 
+                    <a
+                        href="/cart"
+                        class="flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                        Корзина
+                        <span
+                            v-if="cartCount > 0"
+                            class="min-w-5 rounded-full bg-primary px-1.5 py-0.5 text-center text-xs font-semibold text-primary-foreground tabular-nums"
+                        >{{ cartCount }}</span>
+                    </a>
+
                     <Link v-if="$page.props.auth.user" :href="dashboard()" class="text-sm text-muted-foreground transition-colors hover:text-foreground">
                         Личный кабинет
                     </Link>
@@ -563,16 +599,27 @@ const endpoints = [
                                         {{ item.in_stock ? `${item.available} шт.` : 'нет в наличии' }}
                                     </span>
                                 </div>
-                                <Button
-                                    v-if="item.in_stock"
-                                    size="sm"
-                                    class="w-full"
-                                    :disabled="purchasingSku === item.sku || !item.in_stock"
-                                    @click="handlePurchase(item.sku)"
-                                >
-                                    <span v-if="purchasingSku === item.sku">Оформление...</span>
-                                    <span v-else>Купить</span>
-                                </Button>
+                                <div v-if="item.in_stock" class="flex gap-2">
+                                    <Button
+                                        size="sm"
+                                        class="flex-1"
+                                        :disabled="purchasingSku === item.sku"
+                                        @click="handlePurchase(item.sku)"
+                                    >
+                                        <span v-if="purchasingSku === item.sku">Оформление...</span>
+                                        <span v-else>Купить</span>
+                                    </Button>
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
+                                        :disabled="addingSku === item.sku"
+                                        :aria-label="`Добавить ${item.name} в корзину`"
+                                        @click="addToCart(item.sku)"
+                                    >
+                                        <span v-if="addingSku === item.sku">…</span>
+                                        <span v-else>В корзину</span>
+                                    </Button>
+                                </div>
                                 <Button v-else size="sm" variant="outline" class="w-full" disabled>
                                     Нет в наличии
                                 </Button>
