@@ -10,4 +10,4 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 // Cancel expired reservations every minute
-Schedule::job(new CancelExpiredReservations(app(\App\Services\ReservationService::class)))->everyMinute();
+Schedule::job(new CancelExpiredReservations)->everyMinute();

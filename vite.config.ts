@@ -41,6 +41,12 @@ export default defineConfig({
                 '**/vendor/**',
             ],
         },
+        proxy: {
+            '/api': {
+                target: 'http://localhost:8000',
+                changeOrigin: true,
+            },
+        },
     },
     lint: {
         ignorePatterns: [

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\OutOfStockException;
 use App\Http\Requests\CreateOrderRequest;
 use App\Models\Order;
 use App\Models\Product;
@@ -52,6 +53,18 @@ class OrderController extends Controller
                 ),
             ),
             new OA\Response(
+                response: 409,
+                description: 'Последний ключ забрали в этот момент — товар раскуплен',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'error', type: 'string', example: 'sold_out'),
+                        new OA\Property(property: 'message', type: 'string', example: 'Этот товар только что раскупили.'),
+                        new OA\Property(property: 'sku', type: 'string', example: 'KEY-CS2-PRIME'),
+                    ],
+                    type: 'object',
+                ),
+            ),
+            new OA\Response(
                 response: 422,
                 description: 'SKU отсутствует или такого товара нет в каталоге',
                 content: new OA\JsonContent(ref: '#/components/schemas/ValidationError'),
@@ -80,7 +93,17 @@ class OrderController extends Controller
             }
         }
 
-        $order = $this->orderService->createOrder($product, $idempotencyKey);
+        try {
+            $order = $this->orderService->createOrder($product, $idempotencyKey);
+        } catch (OutOfStockException) {
+            // Someone took the last key a moment earlier. This is a normal
+            // outcome of the race, not a failure — say so plainly.
+            return response()->json([
+                'error' => 'sold_out',
+                'message' => 'Этот товар только что раскупили.',
+                'sku' => $product->sku,
+            ], Response::HTTP_CONFLICT);
+        }
 
         return response()->json([
             'data' => [
@@ -157,7 +180,7 @@ class OrderController extends Controller
                 ] : null,
                 'reservation' => $reservation ? [
                     'expires_at' => $reservation->expires_at->toISOString(),
-                    'remaining_seconds' => max(0, $reservation->expires_at->diffInSeconds(now())),
+                    'remaining_seconds' => $this->orderService->remainingReservationSeconds($reservation),
                     'is_active' => $reservation->isActive(),
                 ] : null,
                 'created_at' => $order->created_at,

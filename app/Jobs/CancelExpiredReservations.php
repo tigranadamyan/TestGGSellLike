@@ -26,19 +26,19 @@ class CancelExpiredReservations implements ShouldQueue
      */
     public int $tries = 3;
 
-    public function __construct(
-        private readonly ReservationService $reservationService,
-    ) {}
-
     /**
      * Execute the job.
+     *
+     * The service is resolved here rather than injected into the constructor:
+     * a queued job serialises its constructor arguments, and a service has no
+     * business travelling through Redis.
      */
-    public function handle(): void
+    public function handle(ReservationService $reservations): void
     {
-        $cancelledCount = $this->reservationService->cancelExpiredReservations();
+        $cancelledCount = $reservations->cancelExpiredReservations();
 
         if ($cancelledCount > 0) {
-            Log::info('reservations.expired_cancelled', [
+            Log::info('reservations.expired_released', [
                 'count' => $cancelledCount,
             ]);
         }

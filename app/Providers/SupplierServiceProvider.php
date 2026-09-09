@@ -35,7 +35,9 @@ class SupplierServiceProvider extends ServiceProvider
 
         $this->app->singleton(CatalogService::class, fn () => new CatalogService);
 
-        $this->app->singleton(ReservationService::class, fn () => new ReservationService);
+        $this->app->singleton(ReservationService::class, fn ($app) => new ReservationService(
+            $app->make(CatalogService::class),
+        ));
 
         $this->app->singleton(DeliveryService::class, function ($app) {
             return new DeliveryService(

@@ -97,7 +97,7 @@ class PaymentWebhookController extends Controller
             eventId: $request->validated('event_id'),
             orderId: $request->validated('order_id'),
             status: $request->validated('status'),
-            amount: $request->validated('amount'),
+            amount: (float) $request->validated('amount'),
             currency: $request->validated('currency'),
             payload: $request->all(),
         );

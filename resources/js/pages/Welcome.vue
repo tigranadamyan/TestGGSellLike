@@ -3,7 +3,7 @@ import { Head, Link } from '@inertiajs/vue3';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { dashboard, login, register } from '@/routes';
 import Button from '@/components/ui/button/Button.vue';
-import { subscribeToCatalog } from '@/composables/useBroadcast';
+import { connectionState, subscribeToCatalog } from '@/composables/useBroadcast';
 
 interface CatalogItem {
     sku: string;
@@ -22,7 +22,13 @@ const props = defineProps<{
 
 // Local copy of catalog for real-time updates
 const localCatalog = ref<CatalogItem[]>([...props.catalog]);
-const connectionStatus = ref<'connected' | 'disconnected' | 'connecting'>('connecting');
+
+// Bound straight to the socket, so the badge cannot claim a connection we
+// do not have.
+const connectionStatus = connectionState;
+
+/** Prices that changed under the viewer's feet, keyed by SKU: old -> new. */
+const priceChanges = ref<Record<string, string>>({});
 
 // Purchase resilience state
 const purchasingSku = ref<string | null>(null);
@@ -30,12 +36,29 @@ const purchaseError = ref<string | null>(null);
 const purchaseSuccess = ref<string | null>(null);
 const lastOrderId = ref<number | null>(null);
 
-// Search state
-const searchQuery = ref('');
+// Search state. Seeded from the address bar so a shared link opens the same view.
+const initialParams = new URLSearchParams(window.location.search);
+const searchQuery = ref(initialParams.get('q') ?? '');
+const typeFilter = ref(initialParams.get('type') ?? '');
 const searchResults = ref<CatalogItem[]>([]);
 const isSearching = ref(false);
 const searchTotal = ref(0);
 let searchAbortController: AbortController | null = null;
+
+/** Mirror the current query into the URL without adding history entries. */
+function syncUrl(): void {
+    const params = new URLSearchParams();
+
+    if (searchQuery.value) {
+        params.set('q', searchQuery.value);
+    }
+    if (typeFilter.value) {
+        params.set('type', typeFilter.value);
+    }
+
+    const query = params.toString();
+    window.history.replaceState(null, '', query ? `?${query}` : window.location.pathname);
+}
 
 /** `price` arrives as a decimal string — parse only for display, never for maths. */
 const formatPrice = (price: string, currency: string) =>
@@ -72,18 +95,11 @@ function debounce<T extends (...args: any[]) => any>(fn: T, delay: number): T {
     }) as T;
 }
 
-// Purchase handler with debounce and idempotency
+// Purchase handler. Guards against double submits on the client; the server
+// enforces the same thing with an idempotency key, so a lost response or a
+// reload can never buy twice.
 const handlePurchase = debounce(async (sku: string) => {
-    // Prevent double-purchase
     if (purchasingSku.value) {
-        return;
-    }
-
-    // Check if we already have a pending order for this SKU
-    const existingOrderId = localStorage.getItem(`pending_order_${sku}`);
-    if (existingOrderId) {
-        // Redirect to existing order
-        window.location.href = `/orders/${existingOrderId}`;
         return;
     }
 
@@ -91,10 +107,18 @@ const handlePurchase = debounce(async (sku: string) => {
     purchaseError.value = null;
     purchaseSuccess.value = null;
 
-    try {
-        const idempotencyKey = generateIdempotencyKey();
-        localStorage.setItem(`pending_order_${sku}`, idempotencyKey);
+    // One key per attempt, remembered until the server answers. If the reply is
+    // lost and the shopper retries, the same key reaches the server and returns
+    // the order that already exists rather than creating a second one.
+    const pendingKeyName = `pending_key_${sku}`;
+    let idempotencyKey = localStorage.getItem(pendingKeyName);
 
+    if (!idempotencyKey) {
+        idempotencyKey = generateIdempotencyKey();
+        localStorage.setItem(pendingKeyName, idempotencyKey);
+    }
+
+    try {
         const response = await fetch('/api/orders', {
             method: 'POST',
             headers: {
@@ -106,22 +130,36 @@ const handlePurchase = debounce(async (sku: string) => {
 
         const data = await response.json();
 
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to create order');
+        if (response.status === 409) {
+            // Lost the race for the last key — a normal outcome, not an error.
+            purchaseError.value = data.message ?? 'Этот товар только что раскупили.';
+            localStorage.removeItem(pendingKeyName);
+
+            const index = localCatalog.value.findIndex((item) => item.sku === sku);
+            if (index !== -1) {
+                localCatalog.value[index] = { ...localCatalog.value[index], in_stock: false, available: 0 };
+            }
+
+            return;
         }
 
-        lastOrderId.value = data.data.id;
-        localStorage.setItem(`pending_order_${sku}`, data.data.id.toString());
+        if (!response.ok) {
+            throw new Error(data.message || 'Не удалось оформить заказ');
+        }
 
-        // Redirect to order page
+        // The attempt is over: the key must not survive into the next purchase
+        // of the same item, or the shopper could never buy it twice.
+        localStorage.removeItem(pendingKeyName);
+        lastOrderId.value = data.data.id;
+
         window.location.href = `/orders/${data.data.id}`;
     } catch (error: any) {
         purchaseError.value = error.message || 'Ошибка при создании заказа';
-        localStorage.removeItem(`pending_order_${sku}`);
+        localStorage.removeItem(pendingKeyName);
     } finally {
         purchasingSku.value = null;
     }
-}, 500);
+}, 400);
 
 // Search handler with debounce
 const handleSearch = debounce(async (query: string) => {
@@ -144,6 +182,10 @@ const handleSearch = debounce(async (query: string) => {
             q: query,
             per_page: '24',
         });
+
+        if (typeFilter.value) {
+            params.set('type', typeFilter.value);
+        }
 
         const response = await fetch(`/api/search?${params}`, {
             signal: searchAbortController.signal,
@@ -169,8 +211,21 @@ const handleSearch = debounce(async (query: string) => {
 const onSearchInput = (event: Event) => {
     const target = event.target as HTMLInputElement;
     searchQuery.value = target.value;
+    syncUrl();
     handleSearch(target.value);
 };
+
+const onTypeChange = (event: Event) => {
+    typeFilter.value = (event.target as HTMLSelectElement).value;
+    syncUrl();
+
+    if (searchQuery.value) {
+        handleSearch(searchQuery.value);
+    }
+};
+
+/** While a query is active the full catalogue steps aside, so nothing shows twice. */
+const isSearchMode = computed(() => searchQuery.value.trim().length > 0);
 
 // Real-time update handler
 let unsubscribe: (() => void) | null = null;
@@ -178,32 +233,48 @@ let unsubscribe: (() => void) | null = null;
 onMounted(() => {
     // Connect to WebSocket and subscribe to catalog updates
     unsubscribe = subscribeToCatalog((data) => {
-        connectionStatus.value = 'connected';
-        const { product, change_type } = data;
+        const { product } = data;
 
         // Find and update the product in local catalog
         const index = localCatalog.value.findIndex((item) => item.sku === product.sku);
 
         if (index !== -1) {
-            // Update existing product
+            const previous = localCatalog.value[index];
+
+            // Requirement: a price that moved while the item sat on screen must be
+            // visible before payment, not after.
+            if (previous.price !== product.price) {
+                priceChanges.value[product.sku] = previous.price;
+            }
+
             localCatalog.value[index] = {
-                ...localCatalog.value[index],
+                ...previous,
                 price: product.price,
                 in_stock: product.in_stock,
                 available: product.available,
             };
+
+            // Keep search results honest too.
+            const searchIndex = searchResults.value.findIndex((i) => i.sku === product.sku);
+            if (searchIndex !== -1) {
+                searchResults.value[searchIndex] = {
+                    ...searchResults.value[searchIndex],
+                    price: product.price,
+                    in_stock: product.in_stock,
+                    available: product.available,
+                };
+            }
         } else if (product.in_stock) {
             // Add new product if it's in stock and not already in catalog
             localCatalog.value.push(product);
         }
     });
 
-    // Mark as connected after a short delay
-    setTimeout(() => {
-        if (connectionStatus.value === 'connecting') {
-            connectionStatus.value = 'connected';
-        }
-    }, 1000);
+    // A query carried in the address bar runs immediately, so a shared link
+    // lands on the same results.
+    if (searchQuery.value) {
+        handleSearch(searchQuery.value);
+    }
 });
 
 onUnmounted(() => {
@@ -376,6 +447,7 @@ const endpoints = [
                                 <input
                                     type="text"
                                     placeholder="Поиск по каталогу..."
+                                    :value="searchQuery"
                                     class="w-64 rounded-lg border border-border bg-background px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                                     @input="onSearchInput"
                                 />
@@ -389,6 +461,17 @@ const endpoints = [
                                     </svg>
                                 </span>
                             </div>
+                            <select
+                                :value="typeFilter"
+                                class="rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                                @change="onTypeChange"
+                            >
+                                <option value="">Все типы</option>
+                                <option value="key">Ключ</option>
+                                <option value="giftcard">Гифт-карта</option>
+                                <option value="subscription">Подписка</option>
+                                <option value="topup">Пополнение</option>
+                            </select>
                             <a href="/api/documentation" class="text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline">
                                 Открыть в Swagger →
                             </a>
@@ -396,7 +479,7 @@ const endpoints = [
                     </div>
 
                     <!-- Search results -->
-                    <div v-if="searchQuery && searchResults.length > 0" class="mb-8">
+                    <div v-if="isSearchMode && searchResults.length > 0" class="mb-8">
                         <h3 class="mb-4 text-lg font-medium">
                             Результаты поиска ({{ searchTotal }})
                         </h3>
@@ -443,11 +526,11 @@ const endpoints = [
                     </div>
 
                     <!-- No search results -->
-                    <div v-else-if="searchQuery && searchResults.length === 0 && !isSearching" class="mb-8 rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
+                    <div v-else-if="isSearchMode && !isSearching" class="mb-8 rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
                         По запросу "{{ searchQuery }}" ничего не найдено.
                     </div>
 
-                    <div v-if="hasCatalog" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <div v-if="hasCatalog && !isSearchMode" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                         <article
                             v-for="item in localCatalog"
                             :key="item.sku"
@@ -461,8 +544,17 @@ const endpoints = [
 
                             <div class="mt-auto">
                                 <div class="flex items-end justify-between gap-2 mb-3">
-                                    <span class="text-xl font-semibold tabular-nums">
-                                        {{ formatPrice(item.price, item.currency) }}
+                                    <span class="flex items-baseline gap-2">
+                                        <span class="text-xl font-semibold tabular-nums">
+                                            {{ formatPrice(item.price, item.currency) }}
+                                        </span>
+                                        <span
+                                            v-if="priceChanges[item.sku]"
+                                            class="text-xs text-muted-foreground line-through tabular-nums"
+                                            title="Цена изменилась, пока страница была открыта"
+                                        >
+                                            {{ formatPrice(priceChanges[item.sku], item.currency) }}
+                                        </span>
                                     </span>
                                     <span
                                         class="text-xs tabular-nums"
@@ -493,7 +585,10 @@ const endpoints = [
                         {{ purchaseError }}
                     </div>
 
-                    <p v-else class="rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
+                    <p
+                        v-if="!hasCatalog && !isSearchMode"
+                        class="rounded-xl border border-dashed border-border p-10 text-center text-sm text-muted-foreground"
+                    >
                         Каталог пуст. Заполните его командой
                         <code class="rounded bg-muted px-1.5 py-0.5 text-xs">php artisan db:seed</code>.
                     </p>

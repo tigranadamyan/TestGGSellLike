@@ -81,15 +81,16 @@ class PaymentService
             return false;
         }
 
-        // Validate reservation is still active (skip if no reservation exists for backward compatibility)
-        $hasReservation = \App\Models\Reservation::where('order_id', $order->id)->exists();
-        if ($hasReservation && ! $this->reservationService->validateReservation($order)) {
-            Log::warning('payment.reservation_expired', [
+        // A lapsed hold must never make us drop a payment on the floor. The money
+        // has already moved, so the event is always applied; delivery then either
+        // grabs another key or parks the order in `out_of_stock`, which the
+        // reconciliation sweep reports. Rejecting here left the order in
+        // `created` with the event unprocessed and nothing watching it.
+        if (! $this->reservationService->validateReservation($order)) {
+            Log::warning('payment.reservation_lapsed', [
                 'order_id' => $order->id,
                 'event_id' => $event->event_id,
             ]);
-
-            return false;
         }
 
         if ($event->status === PaymentEventStatus::Paid->value) {
@@ -109,6 +110,16 @@ class PaymentService
 
         if ($event->status === PaymentEventStatus::Failed->value) {
             $order->transitionTo(OrderStatus::PaymentFailed);
+
+            // A failed payment is terminal, so the held key must go straight back
+            // on sale instead of waiting out the timer.
+            $reservation = \App\Models\Reservation::where('order_id', $order->id)
+                ->whereNull('cancelled_at')
+                ->first();
+
+            if ($reservation) {
+                $this->reservationService->releaseReservation($reservation);
+            }
 
             $event->update(['order_id' => $order->id, 'processed_at' => now()]);
 

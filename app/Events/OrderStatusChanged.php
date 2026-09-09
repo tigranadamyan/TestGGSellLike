@@ -19,6 +19,13 @@ class OrderStatusChanged implements ShouldBroadcast
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
+    /**
+     * The status change is written inside a transaction, and the delivery row is
+     * written just before it. Broadcasting only after the commit means the worker
+     * cannot read a half-written order and publish an order without its key.
+     */
+    public bool $afterCommit = true;
+
     public function __construct(
         public readonly Order $order,
         public readonly string $oldStatus,
@@ -51,11 +58,20 @@ class OrderStatusChanged implements ShouldBroadcast
      */
     public function broadcastWith(): array
     {
+        // The key travels with the status. Without it the order page flipped to
+        // "delivered" but kept showing "waiting for the key" until a reload.
+        $delivery = $this->order->delivery()->first();
+
         return [
             'order_id' => $this->order->id,
             'sku' => $this->order->sku,
             'old_status' => $this->oldStatus,
             'new_status' => $this->newStatus,
+            'delivery' => $delivery ? [
+                'status' => $delivery->status->value,
+                'code' => $delivery->code,
+                'supplier' => $delivery->supplier,
+            ] : null,
             'timestamp' => now()->toISOString(),
         ];
     }

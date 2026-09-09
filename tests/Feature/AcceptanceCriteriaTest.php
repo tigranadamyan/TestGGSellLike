@@ -51,6 +51,23 @@ class AcceptanceCriteriaTest extends TestCase
             ->json('data.id');
     }
 
+    /**
+     * An order placed with no local key on the shelf.
+     *
+     * The storefront refuses this (a shopper must not pay for something that is
+     * gone — see LastUnitRaceTest), but the supplier fallback and restock
+     * recovery paths below are precisely about orders in that position, so they
+     * are placed explicitly instead of through the public endpoint.
+     */
+    private function createBackorder(string $sku): int
+    {
+        $product = Product::where('sku', $sku)->firstOrFail();
+
+        return app(\App\Services\OrderService::class)
+            ->createOrder($product, null, requireStock: false)
+            ->id;
+    }
+
     /** The payment system always settles the order's actual price. */
     private function webhook(int $orderId, string $eventId, string $status = 'paid'): \Illuminate\Testing\TestResponse
     {
@@ -213,7 +230,7 @@ class AcceptanceCriteriaTest extends TestCase
 
         // No local keys => supplier path.
         Product::factory()->create(['sku' => 'C4_SKU']);
-        $orderId = $this->createOrder('C4_SKU');
+        $orderId = $this->createBackorder('C4_SKU');
         $this->webhook($orderId, 'evt_c4')->assertOk();
 
         $this->assertEquals(OrderStatus::Delivered, \App\Models\Order::find($orderId)->status);
@@ -235,7 +252,7 @@ class AcceptanceCriteriaTest extends TestCase
         Config::set('suppliers.retry_backoff_ms', [0, 0]);
 
         Product::factory()->create(['sku' => 'C5_SKU']);
-        $orderId = $this->createOrder('C5_SKU');
+        $orderId = $this->createBackorder('C5_SKU');
         $this->webhook($orderId, 'evt_c5')->assertOk();
 
         $this->assertEquals(OrderStatus::Delivered, \App\Models\Order::find($orderId)->status);
@@ -264,7 +281,7 @@ class AcceptanceCriteriaTest extends TestCase
         Config::set('suppliers.retry_backoff_ms', [0]);
 
         $product = Product::factory()->create(['sku' => 'C6_SKU']);
-        $orderId = $this->createOrder('C6_SKU');
+        $orderId = $this->createBackorder('C6_SKU');
 
         // No crash, and the payment is still acknowledged.
         $this->webhook($orderId, 'evt_c6')->assertOk();

@@ -1,93 +1,110 @@
 import Echo from 'laravel-echo';
 import Pusher from 'pusher-js';
+import { ref, type Ref } from 'vue';
 
-// Make Pusher available globally for Laravel Echo
+// laravel-echo looks this up on the window.
 (window as any).Pusher = Pusher;
 
-let echo: Echo | null = null;
+export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
+
+/** Real socket state, not a guess — the UI badge is bound straight to this. */
+export const connectionState: Ref<ConnectionState> = ref('connecting');
+
+let echo: Echo<'reverb'> | null = null;
 
 /**
- * Get or create the Echo instance (singleton).
+ * The WebSocket lives on the same origin as the page: nginx routes /app to
+ * Reverb. That keeps it working on localhost and behind the Cloudflare tunnel
+ * alike, instead of hardcoding a host that only exists on the developer's
+ * machine.
  */
-export function getEcho(): Echo {
-    if (!echo) {
-        echo = new Echo({
-            broadcaster: 'reverb',
-            key: import.meta.env.VITE_REVERB_APP_KEY,
-            wsHost: import.meta.env.VITE_REVERB_HOST || 'localhost',
-            wsPort: parseInt(import.meta.env.VITE_REVERB_PORT || '8080', 10),
-            wssPort: parseInt(import.meta.env.VITE_REVERB_PORT || '8080', 10),
-            forceTLS: (import.meta.env.VITE_REVERB_SCHEME || 'http') === 'https',
-            enabledTransports: ['ws', 'wss'],
-        });
+function currentPort(): number {
+    if (window.location.port) {
+        return Number(window.location.port);
     }
+    return window.location.protocol === 'https:' ? 443 : 80;
+}
+
+export function getEcho(): Echo<'reverb'> {
+    if (echo) {
+        return echo;
+    }
+
+    const isSecure = window.location.protocol === 'https:';
+    const port = currentPort();
+
+    echo = new Echo({
+        broadcaster: 'reverb',
+        key: import.meta.env.VITE_REVERB_APP_KEY,
+        wsHost: window.location.hostname,
+        wsPort: port,
+        wssPort: port,
+        forceTLS: isSecure,
+        enabledTransports: isSecure ? ['wss'] : ['ws'],
+    });
+
+    const connection = (echo as any).connector?.pusher?.connection;
+
+    if (connection) {
+        const sync = () => {
+            const state = connection.state as string;
+            connectionState.value =
+                state === 'connected' ? 'connected' : state === 'connecting' || state === 'initialized' ? 'connecting' : 'disconnected';
+        };
+
+        connection.bind('state_change', sync);
+        connection.bind('error', () => {
+            connectionState.value = 'disconnected';
+        });
+        sync();
+    } else {
+        connectionState.value = 'disconnected';
+    }
+
     return echo;
 }
 
-/**
- * Subscribe to the catalog channel and listen for updates.
- *
- * @param onUpdate - Callback fired when a product is updated
- * @returns Cleanup function to unsubscribe
- */
-export function subscribeToCatalog(
-    onUpdate: (data: {
-        product: {
-            sku: string;
-            name: string;
-            type: string;
-            price: string;
-            currency: string;
-            in_stock: boolean;
-            available: number;
-            old_price: string | null;
-            old_available: number | null;
-        };
-        change_type: string;
-        timestamp: string;
-    }) => void,
-): () => void {
-    const echo = getEcho();
-
-    const channel = echo.channel('catalog');
-
-    channel.listen('.catalog.updated', (data: any) => {
-        onUpdate(data);
-    });
-
-    // Return cleanup function
-    return () => {
-        echo.leave('catalog');
+export interface CatalogUpdatePayload {
+    product: {
+        sku: string;
+        name: string;
+        type: string;
+        price: string;
+        currency: string;
+        in_stock: boolean;
+        available: number;
+        old_price: string | null;
+        old_available: number | null;
     };
+    change_type: string;
+    timestamp: string;
 }
 
-/**
- * Subscribe to a specific order's status changes.
- *
- * @param orderId - The order ID to listen for
- * @param onStatusChange - Callback fired when order status changes
- * @returns Cleanup function to unsubscribe
- */
-export function subscribeToOrder(
-    orderId: number,
-    onStatusChange: (data: {
-        order_id: number;
-        sku: string;
-        old_status: string;
-        new_status: string;
-        timestamp: string;
-    }) => void,
-): () => void {
-    const echo = getEcho();
+/** Listen for price and availability changes on the shared catalog channel. */
+export function subscribeToCatalog(onUpdate: (data: CatalogUpdatePayload) => void): () => void {
+    const instance = getEcho();
+    instance.channel('catalog').listen('.catalog.updated', onUpdate);
 
-    const channel = echo.channel(`order.${orderId}`);
+    return () => instance.leave('catalog');
+}
 
-    channel.listen('.order.status_changed', (data: any) => {
-        onStatusChange(data);
-    });
+export interface OrderStatusPayload {
+    order_id: number;
+    sku: string;
+    old_status: string;
+    new_status: string;
+    delivery: {
+        status: string;
+        code: string | null;
+        supplier: string | null;
+    } | null;
+    timestamp: string;
+}
 
-    // Return cleanup function
-    return () => {
-        echo.leave(`order.${orderId}`);
-    };
+/** Listen for one order's progress. */
+export function subscribeToOrder(orderId: number, onStatusChange: (data: OrderStatusPayload) => void): () => void {
+    const instance = getEcho();
+    instance.channel(`order.${orderId}`).listen('.order.status_changed', onStatusChange);
+
+    return () => instance.leave(`order.${orderId}`);
 }

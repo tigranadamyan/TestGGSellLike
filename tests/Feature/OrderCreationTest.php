@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Enums\OrderStatus;
+use App\Enums\ProductKeyStatus;
 use App\Models\Product;
+use App\Models\ProductKey;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -13,13 +15,24 @@ class OrderCreationTest extends TestCase
 {
     use RefreshDatabase;
 
+    private function stockOneKey(Product $product): void
+    {
+        ProductKey::create([
+            'product_id' => $product->id,
+            'code' => $product->sku.'-KEY',
+            'status' => ProductKeyStatus::Available,
+        ]);
+    }
+
     public function test_creates_an_order_with_correct_data(): void
     {
         $product = Product::factory()->create([
             'sku' => 'TEST_SKU_001',
             'price' => 1499.00,
             'currency' => 'RUB',
+            'available_keys_count' => 1,
         ]);
+        $this->stockOneKey($product);
 
         $response = $this->postJson('/api/orders', ['sku' => 'TEST_SKU_001']);
 
@@ -43,7 +56,9 @@ class OrderCreationTest extends TestCase
         $product = Product::factory()->create([
             'sku' => 'PRICE_TEST',
             'price' => 1000.00,
+            'available_keys_count' => 1,
         ]);
+        $this->stockOneKey($product);
 
         $this->postJson('/api/orders', ['sku' => 'PRICE_TEST']);
 

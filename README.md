@@ -20,7 +20,8 @@ app/
 └── Suppliers/                  # SupplierA, SupplierB, SupplierManager, Contracts/SupplierInterface
 ```
 
-**Стек**: PHP 8.3+, Laravel 13, PostgreSQL 16+, Redis, Laravel Horizon, PHPUnit.
+**Стек**: PHP 8.3+, Laravel 13, PostgreSQL 16+, Redis, Laravel Horizon, Laravel Reverb,
+Vue 3 + Inertia, PHPUnit.
 
 ## Стратегия exactly-once доставки
 
@@ -195,6 +196,77 @@ php artisan serve
 php artisan horizon
 ```
 
+## Живая витрина, бронь и гонка за последней единицей
+
+### Бронь держит ключ, а не товар
+
+Заказ забирает **один конкретный `product_key`** и снимает его с витрины сразу,
+ещё до оплаты. Держится это двумя частичными уникальными индексами:
+
+```sql
+UNIQUE (product_key_id) WHERE cancelled_at IS NULL   -- один ключ — одна бронь
+UNIQUE (order_id)       WHERE cancelled_at IS NULL   -- один заказ — одна бронь
+```
+
+Выбор ключа идёт под `FOR UPDATE SKIP LOCKED`, поэтому параллельные покупатели
+разбирают **разные** ключи, а не выстраиваются в очередь за одним.
+
+Через пять минут `schedule:work` (контейнер `dgs_scheduler`) снимает просроченные
+брони: ключ возвращается в `available`, счётчик витрины растёт обратно, и об этом
+уходит broadcast. Неудачная оплата освобождает ключ сразу, не дожидаясь таймера.
+
+### Отказ вместо ошибки
+
+Если свободного ключа не осталось, заказ **не создаётся**: `POST /api/orders`
+отвечает `409` с телом `{"error":"sold_out","message":"…","sku":"…"}`. Проигравший
+в гонке не получает заказ, который нечем закрыть, и не может его оплатить.
+
+Заказ при нулевом остатке всё ещё возможен — но только явно, через
+`OrderService::createOrder($product, null, requireStock: false)`. На этом держится
+критерий 6: платёж записывается, заказ паркуется в `out_of_stock`, а сверка
+доводит его до выдачи после пополнения или через внешнего поставщика.
+
+### Реальное время
+
+`CatalogUpdated` и `OrderStatusChanged` уходят в Laravel Reverb (`dgs_reverb`).
+Наружу и сайт, и WebSocket смотрят через один origin: nginx (`dgs_proxy`) отдаёт
+`/app` в Reverb, всё остальное — в приложение. Поэтому живые обновления работают
+и на `localhost`, и через Cloudflare Tunnel, который умеет пробрасывать только
+один адрес.
+
+Фронтенд берёт хост и порт сокета из `window.location`, ничего не зашивая. Бейдж
+«Live» привязан к состоянию соединения pusher-js — он не может утверждать, что
+связь есть, когда её нет.
+
+### Как воспроизвести
+
+**Живое обновление.** Откройте витрину в двух вкладках и заберите единицу мимо
+браузера:
+
+```bash
+curl -X POST localhost:8080/api/orders -H 'Content-Type: application/json' \
+     -d '{"sku":"KEY-CS2-PRIME"}'
+```
+
+Остаток на карточках уменьшится в обеих вкладках без перезагрузки. Когда он дойдёт
+до нуля, кнопка «Купить» станет неактивной одновременно у всех.
+
+**Гонка за последней единицей.** Оставьте у товара один ключ и ударьте двумя
+запросами сразу:
+
+```bash
+for i in 1 2; do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8080/api/orders \
+       -H 'Content-Type: application/json' -d '{"sku":"GIFT-ROBLOX-800"}' &
+done; wait
+```
+
+Один ответ `201`, другой `409` с сообщением «Этот товар только что раскупили».
+
+**Бронь с таймером.** Откройте `/orders/{id}` сразу после создания заказа — там
+идёт обратный отсчёт. Через пять минут (или после `UPDATE reservations SET
+expires_at = now() - interval '1 minute'`) планировщик вернёт ключ в продажу.
+
 ## Очереди и Horizon
 
 Ключ выдаётся не в HTTP-запросе. Вебхук оплаты только переводит заказ в `paid` и
@@ -220,7 +292,8 @@ Redis, но их некому взять.
 
 ```
 GET    /api/catalog                  — Витрина остатков (keyset-пагинация)
-POST   /api/orders                   — Создать заказ (тело: {sku})
+GET    /api/search                   — Полнотекстовый поиск (q, type, in_stock)
+POST   /api/orders                   — Создать заказ (тело: {sku}); 409, если раскуплен
 GET    /api/orders/{id}              — Получить заказ + доставку
 POST   /api/webhooks/payment         — Вебхук оплаты
 POST   /api/internal/reconciliation  — Запустить сверку и восстановление
